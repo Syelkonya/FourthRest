@@ -20,6 +20,17 @@ import java.util.Map;
 @Configuration
 public class KafkaConfig {
 
+    @Bean
+    public KafkaTemplate<String, Object> objectKafkaTemplate() {
+        Map<String, Object> props = new HashMap<>();
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, JacksonJsonSerializer.class);
+
+        ProducerFactory<String, Object> factory = new DefaultKafkaProducerFactory<>(props);
+        return new KafkaTemplate<>(factory);
+    }
+
     @Value("${spring.kafka.bootstrap-servers}")
     private String bootstrapServers;
 
@@ -65,6 +76,14 @@ public class KafkaConfig {
     @Bean
     public NewTopic resultTopic() {
         return TopicBuilder.name("notification.result")
+                .partitions(1)
+                .replicas(1)
+                .build();
+    }
+
+    @Bean
+    public NewTopic eventsTopic() {
+        return TopicBuilder.name("notification.events")
                 .partitions(1)
                 .replicas(1)
                 .build();

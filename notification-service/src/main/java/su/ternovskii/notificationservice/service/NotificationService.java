@@ -13,6 +13,7 @@ import su.ternovskii.notificationservice.dto.response.NotificationResponse;
 import su.ternovskii.notificationservice.entity.ChannelDeliveryEntity;
 import su.ternovskii.notificationservice.entity.NotificationEntity;
 import su.ternovskii.notificationservice.entity.NotificationTemplateEntity;
+import su.ternovskii.notificationservice.kafka.EventPublisher;
 import su.ternovskii.notificationservice.kafka.NotificationKafkaProducer;
 import su.ternovskii.notificationservice.mapper.NotificationMapper;
 import su.ternovskii.notificationservice.model.Channel;
@@ -36,12 +37,15 @@ public class NotificationService {
     private final NotificationKafkaProducer notificationKafkaProducer;
     private final ChannelDeliveryRepository channelDeliveryRepository;
     private final KafkaTemplate<String, NotificationCommand> kafkaTemplate;
+    private final EventPublisher eventPublisher;
 
     @Transactional
     public NotificationResponse sendNotification(NotificationRequest notificationRequest) {
         // 1. Создаём уведомление в БД (как раньше)
         NotificationEntity entity = notificationPersistence.create(notificationRequest);
         log.info("Created notification id={} status=NEW", entity.getId());
+        eventPublisher.publish("NOTIFICATION_CREATED", entity.getId(), null,
+                entity.getRecipient(), 0, null, null);
 
         // 2. Для КАЖДОГО канала — создаём ChannelDelivery и шлём команду в Kafka
         for (Channel channel : Channel.values()) {
@@ -66,6 +70,8 @@ public class NotificationService {
             // Отправляем в Kafka
             kafkaTemplate.send(topic, String.valueOf(entity.getId()), command);
             log.info("Sent command to {} for notificationId={}", topic, entity.getId());
+            eventPublisher.publish("COMMAND_SENT", entity.getId(), channel.name(),
+                    entity.getRecipient(), 0, null, null);
         }
 
         return notificationMapper.toResponse(entity);
@@ -88,6 +94,7 @@ public class NotificationService {
 
     @Transactional
     public void retryFailedDeliveries(int maxRetries) {
+
         List<ChannelDeliveryEntity> toRetry = channelDeliveryRepository
                 .findByStatusAndNextRetryAtBeforeAndRetryCountLessThan(
                         DeliveryStatus.FAILED, Instant.now(), maxRetries);
@@ -95,6 +102,10 @@ public class NotificationService {
         log.info("Retry scheduler: found {} failed deliveries", toRetry.size());
 
         for (ChannelDeliveryEntity delivery : toRetry) {
+            eventPublisher.publish("RETRY_SCHEDULED", delivery.getNotification().getId(),
+                    delivery.getChannel().name(), delivery.getNotification().getRecipient(),
+                    delivery.getRetryCount(), null, null);
+
             delivery.setStatus(DeliveryStatus.PENDING);
             delivery.setNextRetryAt(null);
             channelDeliveryRepository.save(delivery);

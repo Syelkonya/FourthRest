@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import su.ternovskii.notificationservice.dto.kafka.NotificationResult;
 import su.ternovskii.notificationservice.entity.ChannelDeliveryEntity;
+import su.ternovskii.notificationservice.kafka.EventPublisher;
 import su.ternovskii.notificationservice.model.Channel;
 import su.ternovskii.notificationservice.model.DeliveryStatus;
 import su.ternovskii.notificationservice.repository.ChannelDeliveryRepository;
@@ -19,6 +20,7 @@ import java.time.Instant;
 public class ResultListener {
 
     private final ChannelDeliveryRepository channelDeliveryRepository;
+    private final EventPublisher eventPublisher;
 
     @Transactional
     @KafkaListener(topics = "notification.result", groupId = "notification-service")
@@ -45,10 +47,16 @@ public class ResultListener {
         if (result.success()) {
             delivery.setStatus(DeliveryStatus.SENT);
             delivery.setNextRetryAt(null);
+            eventPublisher.publish("DELIVERY_SUCCESS", result.notificationId(),
+                    result.channel(), delivery.getNotification().getRecipient(),
+                    delivery.getRetryCount(), null, null);
         } else {
             delivery.setStatus(DeliveryStatus.FAILED);
             delivery.setRetryCount(delivery.getRetryCount() + 1);
             delivery.setNextRetryAt(Instant.now().plusSeconds(60));
+            eventPublisher.publish("DELIVERY_FAILED", result.notificationId(),
+                    result.channel(), delivery.getNotification().getRecipient(),
+                    delivery.getRetryCount(), null, result.errorMessage());
         }
 
         channelDeliveryRepository.save(delivery);
