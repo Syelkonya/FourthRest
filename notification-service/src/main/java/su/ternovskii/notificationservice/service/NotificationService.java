@@ -2,17 +2,27 @@ package su.ternovskii.notificationservice.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import su.ternovskii.notificationservice.dispatcher.NotificationDispatcher;
+import su.ternovskii.notificationservice.dto.kafka.NotificationCommand;
+import su.ternovskii.notificationservice.dto.kafka.NotificationResult;
 import su.ternovskii.notificationservice.dto.request.NotificationRequest;
 import su.ternovskii.notificationservice.dto.response.NotificationResponse;
+import su.ternovskii.notificationservice.entity.ChannelDeliveryEntity;
 import su.ternovskii.notificationservice.entity.NotificationEntity;
 import su.ternovskii.notificationservice.entity.NotificationTemplateEntity;
+import su.ternovskii.notificationservice.kafka.EventPublisher;
+import su.ternovskii.notificationservice.kafka.NotificationKafkaProducer;
 import su.ternovskii.notificationservice.mapper.NotificationMapper;
+import su.ternovskii.notificationservice.model.Channel;
+import su.ternovskii.notificationservice.model.DeliveryStatus;
 import su.ternovskii.notificationservice.model.NotificationStatus;
 import su.ternovskii.notificationservice.persistence.NotificationPersistence;
+import su.ternovskii.notificationservice.repository.ChannelDeliveryRepository;
 
+import java.time.Instant;
 import java.util.List;
 
 @Slf4j
@@ -22,27 +32,48 @@ public class NotificationService {
 
 
     private final NotificationMapper notificationMapper;
-    private final NotificationDispatcher notificationDispatcher;
     private final NotificationPersistence notificationPersistence;
     private final NotificationTemplateService notificationTemplateService;
+    private final NotificationKafkaProducer notificationKafkaProducer;
+    private final ChannelDeliveryRepository channelDeliveryRepository;
+    private final KafkaTemplate<String, NotificationCommand> kafkaTemplate;
+    private final EventPublisher eventPublisher;
 
     @Transactional
     public NotificationResponse sendNotification(NotificationRequest notificationRequest) {
-        if (!notificationDispatcher.supports(notificationRequest.channel())) {
-            throw new IllegalArgumentException("Unknown channel: " + notificationRequest.channel());
-        }
-
+        // 1. Создаём уведомление в БД (как раньше)
         NotificationEntity entity = notificationPersistence.create(notificationRequest);
         log.info("Created notification id={} status=NEW", entity.getId());
+        eventPublisher.publish("NOTIFICATION_CREATED", entity.getId(), null,
+                entity.getRecipient(), 0, null, null);
 
-        NotificationTemplateEntity notificationTemplateEntity =
-                notificationTemplateService.getByChannel(notificationRequest.channel());
+        // 2. Для КАЖДОГО канала — создаём ChannelDelivery и шлём команду в Kafka
+        for (Channel channel : Channel.values()) {
+            // Создаём запись в БД: «по этому каналу статус PENDING»
+            ChannelDeliveryEntity delivery = new ChannelDeliveryEntity();
+            delivery.setNotification(entity);
+            delivery.setChannel(channel);
+            delivery.setStatus(DeliveryStatus.PENDING);
+            channelDeliveryRepository.save(delivery);
 
-        notificationDispatcher.dispatch(
-                notificationTemplateEntity.getChannel(),
-                notificationTemplateEntity.getText().replace("{message}", entity.getMessage()));
+            // Формируем команду для адаптера
+            NotificationCommand command = new NotificationCommand(
+                    entity.getId(),
+                    channel.name(),
+                    entity.getRecipient(),
+                    entity.getMessage()
+            );
 
-        entity = notificationPersistence.updateStatus(entity.getId(), NotificationStatus.SENT);
+            // Определяем топик по каналу
+            String topic = "notification." + channel.name().toLowerCase() + ".send";
+
+            // Отправляем в Kafka
+            kafkaTemplate.send(topic, String.valueOf(entity.getId()), command);
+            log.info("Sent command to {} for notificationId={}", topic, entity.getId());
+            eventPublisher.publish("COMMAND_SENT", entity.getId(), channel.name(),
+                    entity.getRecipient(), 0, null, null);
+        }
+
         return notificationMapper.toResponse(entity);
     }
 
@@ -61,19 +92,35 @@ public class NotificationService {
         return notificationMapper.toResponseList(notifications);
     }
 
-    public void retryPendingNotifications(int maxRetries) {
-        List<NotificationEntity> pending = notificationPersistence.findPendingForRetry(NotificationStatus.NEW, maxRetries);
-        log.info("Retry scheduler: found {} pending notifications", pending.size());
+    @Transactional
+    public void retryFailedDeliveries(int maxRetries) {
 
-        for (NotificationEntity n : pending) {
-            try {
-                notificationDispatcher.dispatch(n.getChannel(), n.getMessage());
-                notificationPersistence.updateStatus(n.getId(), NotificationStatus.SENT);
-            } catch (Exception e) {
-                log.info(e.getMessage());
-                notificationPersistence.registerFailedAttempt(n.getId(), maxRetries);
-            }
+        List<ChannelDeliveryEntity> toRetry = channelDeliveryRepository
+                .findByStatusAndNextRetryAtBeforeAndRetryCountLessThan(
+                        DeliveryStatus.FAILED, Instant.now(), maxRetries);
+
+        log.info("Retry scheduler: found {} failed deliveries", toRetry.size());
+
+        for (ChannelDeliveryEntity delivery : toRetry) {
+            eventPublisher.publish("RETRY_SCHEDULED", delivery.getNotification().getId(),
+                    delivery.getChannel().name(), delivery.getNotification().getRecipient(),
+                    delivery.getRetryCount(), null, null);
+
+            delivery.setStatus(DeliveryStatus.PENDING);
+            delivery.setNextRetryAt(null);
+            channelDeliveryRepository.save(delivery);
+
+            NotificationCommand command = new NotificationCommand(
+                    delivery.getNotification().getId(),
+                    delivery.getChannel().name(),
+                    delivery.getNotification().getRecipient(),
+                    delivery.getNotification().getMessage()
+            );
+
+            String topic = "notification." + delivery.getChannel().name().toLowerCase() + ".send";
+            kafkaTemplate.send(topic, String.valueOf(delivery.getNotification().getId()), command);
+
+            log.info("Retry sent to {} for notificationId={}", topic, delivery.getNotification().getId());
         }
     }
-
 }

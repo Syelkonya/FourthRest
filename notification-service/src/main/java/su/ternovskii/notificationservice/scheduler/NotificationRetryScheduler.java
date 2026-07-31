@@ -13,8 +13,8 @@ public class NotificationRetryScheduler {
 
     private final NotificationService notificationService;
 
-    @Scheduled(fixedDelay = 60_000)
+    @Scheduled(fixedDelay = 30_000)
     public void retryPendingNotifications() {
-        notificationService.retryPendingNotifications(MAX_RETRIES);
+        notificationService.retryFailedDeliveries(MAX_RETRIES);
     }
 }
