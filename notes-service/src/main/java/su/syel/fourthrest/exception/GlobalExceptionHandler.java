@@ -1,6 +1,9 @@
 package su.syel.fourthrest.exception;
 
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import su.syel.fourthrest.model.EventType;
+import su.syel.fourthrest.service.ClickHouseEventService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
@@ -17,7 +20,10 @@ import java.util.List;
 
 @Slf4j
 @RestControllerAdvice
+@RequiredArgsConstructor
 public class GlobalExceptionHandler {
+
+    private final ClickHouseEventService clickHouseEventService;
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ErrorFieldsResponseDTO> handleParameterValidation(
@@ -29,12 +35,21 @@ public class GlobalExceptionHandler {
         if (bindingResult.hasErrors()) {
             List<FieldError> fieldErrorList = bindingResult.getFieldErrors();
 
-            for(FieldError fieldError: fieldErrorList){
+            for (FieldError fieldError : fieldErrorList) {
                 String field = fieldError.getField();
                 String message = fieldError.getDefaultMessage();
                 errors.add(new FieldErrorDetail(field, message));
             }
         }
+
+        clickHouseEventService.recordEvent(
+                "",
+                EventType.REQUEST_FAILED,
+                null,
+                null,
+                HttpStatus.BAD_REQUEST.value(),
+                "ValidationError"
+        );
 
         ErrorFieldsResponseDTO errorFieldsResponseDTO = new ErrorFieldsResponseDTO(
                 LocalDateTime.now(),
@@ -52,9 +67,18 @@ public class GlobalExceptionHandler {
 
         HttpStatusCode statusCode = e.getStatusCode();
         String message = e.getReason();
-        if (message == null){
+        if (message == null) {
             message = e.getMessage();
         }
+
+        clickHouseEventService.recordEvent(
+                "",
+                EventType.REQUEST_FAILED,
+                null,
+                null,
+                statusCode.value(),
+                e.getClass().getSimpleName()
+        );
 
         ErrorResponseDTO errorResponseDTO = new ErrorResponseDTO(
                 LocalDateTime.now(),
@@ -70,6 +94,15 @@ public class GlobalExceptionHandler {
 
         log.info(e.getMessage());
 
+        clickHouseEventService.recordEvent(
+                "",
+                EventType.REQUEST_FAILED,
+                null,
+                null,
+                HttpStatus.INTERNAL_SERVER_ERROR.value(),
+                e.getClass().getSimpleName()
+        );
+
         ErrorResponseDTO errorResponseDTO = new ErrorResponseDTO(
                 LocalDateTime.now(),
                 HttpStatus.INTERNAL_SERVER_ERROR.value(),
@@ -78,5 +111,4 @@ public class GlobalExceptionHandler {
 
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponseDTO);
     }
-
 }
